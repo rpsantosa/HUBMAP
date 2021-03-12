@@ -1,0 +1,321 @@
+
+```{r include=FALSE}
+
+
+library(tensorflow)
+library(keras)
+library(tfdatasets)
+library(tidyverse)
+library(reticulate)
+library(magick)
+library(imager)
+library(dplyr)
+library(sp)
+library(jsonlite)
+#library(tiff)
+
+TRAIN<- file.path("c:/kaggletemp/HuBMAP/train_images/")
+MASK<- file.path("c:/kaggletemp/HuBMAP/mask_images/")
+TEST<- file.path("c:/kaggletemp/HuBMAP/test/")
+BASE<-file.path("c:/kaggletemp/HuBMAP/")
+BASET<-file.path("c:/kaggletemp/HuBMAP/train/")
+EVAL<-file.path("c:/kaggletemp/HuBMAP/evaluation/")
+MODEL<-file.path("c:/kaggletemp/HuBMAP/models/")
+
+
+gpu_devices =  tf$config$experimental$list_physical_devices("GPU")[[1]]
+tf$config$experimental$set_memory_growth(gpu_devices, T)
+
+baseid<-list.files(TEST, full.names = F,pattern = "*.tiff") %>% gsub(pattern = ".tiff",replacement =  "")
+anato<- file.path(TEST, paste0(baseid,"-anatomical-structure.json"))
+img<-file.path(TEST, paste0(baseid,".tiff"))
+
+#train<- read_delim(file.path(BASE,"train.csv"), delim = ",")
+train<-read_csv(file.path(BASE,"sample_submission.csv"))
+dataset<- read_csv(file.path(BASE,"HuBMAP-20-dataset_information.csv"))
+
+dj <- tibble(
+  anato = lapply(anato,fromJSON)
+)
+b<- tibble(baseid=baseid, size = list.files(TEST, full.names = T,pattern = "*.tiff") %>% file.info %>% .$size, k = 1: length(baseid))
+
+make_nn<-function(shape){
+  if(shape[1]==3){
+    ncolsi<-c( seq(0,shape[3] -512, 512), shape[3] -512)
+    nrowsi<-c( seq(0,shape[2]-512, 512) , shape[2]-512)
+    nn<-expand.grid(nrowsi, ncolsi) 
+  }else{
+    ncolsi<-c( seq(0,shape[2] -512, 512), shape[2] -512)
+    nrowsi<-c( seq(0,shape[1]-512, 512) , shape[1]-512)
+    nn<-expand.grid(nrowsi, ncolsi)
+  }
+}
+
+
+```
+
+
+
+```{r}
+
+k=5
+impath<-file.path(TEST,paste0(baseid[k],".tiff") )
+shape<-dataset %>% subset(image_file == paste0(baseid[k],".tiff" )) %>% dplyr::select(width_pixels,height_pixels) 
+np<- import("numpy", convert = T)
+tiff<- import("tifffile", convert = F)
+zz<-tiff$imread(impath)
+```
+
+
+```{r}
+wh<- c(shape$height_pixels,shape$width_pixels)
+size<- prod(wh)
+im<- read_file_raw( impath)
+length(im)
+prod(wh) * 3
+
+
+```
+
+```{python}
+# import tifffile as tiff
+# imx = tiff.imread("c:/kaggletemp/HuBMAP/train/095bf7a1f.tiff")
+
+```
+
+```{r}
+# np<- import("numpy", convert = T)
+# tiff<- import("tifffile", convert = F)
+# zz<-tiff$imread(impath) 
+
+#z<-  tiff$imread(impath) 
+```
+```{r}
+z<- tf$image$convert_image_dtype(zz, dtype = tf$float32)
+```
+
+
+
+```{r}
+z<- tf$constant (  zz, dtype = tf$float32)
+z<- tf$divide(z,255)
+```
+```{r}
+rm(z,zz)
+gc()
+```
+
+
+
+
+```{r}
+# wh<- c(shape$height_pixels,shape$width_pixels)
+# size<- prod(wh)
+# im<- read_file_raw( impath)
+# rr<-length(im)
+# pp<-prod(wh) * 3
+# im<- im[-(1:(rr-pp))]
+```
+
+```{r}
+py_run_string(" 
+import tifffile as tiff
+import numpy as np
+")
+
+
+py_run_string(" 
+def load_image(self, image_id):
+        info = self.image_info[image_id]
+        if not self.is_uint16:
+            image = tifffile.imread(info['path'])
+            if self.group=='rgb':
+                if image.shape[-1]>3:
+                    image=image[:,:,1::]
+            image = util.stretch_8bit(image,lower_percent=2,higher_percent=8)
+
+        else:
+            image = tifffile.imread(info['path'])
+
+        return image 
+        
+")
+
+py_run_string(" 
+
+
+def load_file(f, gray):
+
+    if f[-4:] == 'tiff' or f[-3:] == 'tif':
+        img = tiff.imread(f)
+    else:
+        img = imageio.imread(f)
+    if len(img.shape) == 2:
+        img = np.expand_dims(img, 2)
+    img = np.asarray(img, dtype=np.float32)
+    if gray and img.shape[2] > 1:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        img = np.expand_dims(img, 2)
+    assert(img.shape[2] == 1 or img.shape[2] == 3) # Gray or RGB. Please convert RGBA to RGB.
+    img = np.asarray(img, dtype=np.float32)
+    img = img/255.
+
+    return img 
+        
+")
+```
+
+```{r}
+
+
+
+py_run_string(" 
+def ll(impath) : 
+  img = tiff.imread(impath)
+  npimg = np.array(img,dtype=np.float)
+  return npimg
+")
+
+```
+```{r}
+np<- import("numpy")
+tiff<- import("tifffile")
+  img = tiff$imread(impath)
+    npimg = np$array(img,dtype=np$float)
+```
+
+```{r}
+k=5
+impath<-file.path(TEST,paste0(baseid[k],".tiff") )
+shape<-dataset %>% subset(image_file == paste0(baseid[k],".tiff" )) %>% dplyr::select(width_pixels,height_pixels) 
+np<- import("numpy", convert = T)
+tiff<- import("tifffile", convert = F)
+zz<-tiff$imread(impath)
+#z<- tf$constant(zz)
+# zz$shape
+# 
+z<- tf$constant(zz)
+
+```
+```{r}
+  #shape<-dataset %>% subset(image_file == paste0(baseid[k],".tiff" )) %>% dplyr::select(width_pixels,height_pixels) 
+  shape<- dim(z)
+  nn<-make_nn
+  
+  i=nn[nrow(nn)/2,1]
+  j=nn[nrow(nn)/2,2]
+  
+  if(shape[1]==3){
+  imx<-z[,(i+1):(i+512),(j+1):(j+512)] %>%  k_permute_dimensions(c(2,3,1)) %>%
+    tf$image$convert_image_dtype(.,tf$float32) %>%
+    tf$divide(.,255)
+  }else
+  {imx<-z[(i+1):(i+512),(j+1):(j+512),] %>%
+    tf$image$convert_image_dtype(.,tf$float32) %>%
+    tf$divide(.,255)
+    
+  }
+```
+
+
+```{r}
+ thr <-  .7
+  SPLIT<- 2 ^9
+  impath<-file.path(TEST,paste0(baseid[k],".tiff") )
+  # im<-read_file_raw(impath) %>% image_read
+  #im<-image_read(impath)
+  #im<-readTIFF(impath, convert=T)
+  im<-  tf$constant( tiff$imread(impath)  )
+  gc()
+  shape<- dim(im)
+  cfirst<- shape[1]==3
+  nn<-make_nn(shape)
+  
+ # pb <- txtProgressBar(min = 0, max = nrow(nn), style = 3)
+  # i= which(nn$Var1 ==5633 & nn$Var2 == 8705)
+  
+  idxt<- vector(mode="integer")
+  for(i in seq_len(nrow(nn)) ){
+    img<- array_to_tensorflow(nn[i,1],nn[i,2],im=im) # fist height then width
+    #if( img %>% as.array %>% max< .2){next}
+    if(isCortex(nn[i,2],nn[i,1],k,SPLIT)==0){next}
+  
+    pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>% .[,,,1]  %>% .[1,,] %>% as.array
+  
+    predx<- pred > thr
+    pred[predx]<-1;pred[!predx]<-0
+   # pred <- pred %>% shrink(50) %>% grow(50)  #%>%as.matrix
+  
+  
+    ncoli<- nn[i,2];nrowi<-nn[i,1]
+    coord<- which(pred ==1, arr.ind = T) %>% as.data.frame
+    #idx<- apply(coord, 1,function(row){(row[2]+ncoli-1)*shape$height_pixels + row[1]+nrowi})
+    idx<- with(coord, {(col+ncoli-1)* ifelse(cfirst, shape[2], shape[1]) + row +nrowi })#shape$height_pixels
+  ######################################  
+    # true<- small_mask(k,nn[i,1],nn[i,2]) 
+    # truex<-which(true==1)
+    # predx<-which(pred==1)
+    # dice_hard(truex,predx)
+  ##########################################  
+    idxt<-c(idx,idxt)
+    #cat(i,"\t")
+  #  setTxtProgressBar(pb, i)
+    if(i %%100 ==0){gc()}
+  }
+```
+
+
+```{r}
+thr <-  .7
+  SPLIT<- 2 ^9
+  impath<-file.path(TEST,paste0(baseid[k],".tiff") )
+  np<- import("numpy", convert = T)
+  tiff<- import("tifffile", convert = F)
+  # im<-read_file_raw(impath) %>% image_read
+  #im<-image_read(impath)
+  #im<-readTIFF(impath, convert=T)
+  im<-  tf$constant( tiff$imread(impath)  )
+  imx<- image_read(impath)
+  gc()
+  shape<- dim(im)
+  cfirst<- shape[1]==3
+  nn<-make_nn(shape)
+  
+ # pb <- txtProgressBar(min = 0, max = nrow(nn), style = 3)
+  # i= which(nn$Var1 ==5633 & nn$Var2 == 8705)
+  
+  idxt<- vector(mode="integer")
+  ii<-vector()
+  for(i in seq_len(nrow(nn)) ){
+    img<- array_to_tensorflow(nn[i,1],nn[i,2],im) # fist height then width
+   # imm<- makeimg(nn[i,2],nn[i,1],imx)
+    #if( img %>% as.array %>% max< .2){next}
+    if(isCortex(nn[i,2],nn[i,1],k,SPLIT)==0){ii<- c(ii,i)}
+  }
+  mm<-vector()
+  for(i in ii){
+    img<- array_to_tensorflow(nn[i,1],nn[i,2],im=im) # fist height then width
+     pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>% .[,,,1]  %>% .[1,,] %>% as.array
+     mm<- c(mm,max(pred))
+  }
+  
+candidates<- which(mm > .8)
+i<- candidates[1]
+
+```
+
+```{r}
+setwd("../input/jane-street-market-prediction" )
+library(reticulate)
+
+py_run_string("import janestreet")
+py_run_string("
+env = janestreet.make_env()
+iter_test = env.iter_test() ")
+
+```
+
+
+
+
+

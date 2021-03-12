@@ -1,0 +1,340 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+
+
+library(unet)
+library(tensorflow)
+library(keras)
+library(tfdatasets)
+library(tidyverse)
+library(rsample)
+library(reticulate)
+library(magick)
+library(imager)
+library(dplyr)
+library(sp)
+
+TRAIN<- file.path("c:/kaggletemp/HuBMAP/train_images/")
+MASK<- file.path("c:/kaggletemp/HuBMAP/mask_images/")
+TEST<- file.path("c:/kaggletemp/HuBMAP/test/")
+BASE<-file.path("c:/kaggletemp/HuBMAP/")
+BASET<-file.path("c:/kaggletemp/HuBMAP/train/")
+EVAL<-file.path("c:/kaggletemp/HuBMAP/evaluation/")
+MODEL<-file.path("c:/kaggletemp/HuBMAP/models/")
+
+
+gpu_devices =  tf$config$experimental$list_physical_devices("GPU")[[1]]
+tf$config$experimental$set_memory_growth(gpu_devices, T)
+
+
+bce_dice_loss <- function(y_true, y_pred) {
+    result <- loss_binary_crossentropy(y_true, y_pred) +
+        (1 - dice(y_true, y_pred))
+    return(result)
+} 
+
+dice <- custom_metric("dice", function(y_true, y_pred, smooth = 1e-5) {
+  y_true_f <- k_flatten(y_true)
+  y_pred_f <- k_flatten(y_pred)
+  intersection <- k_sum(y_true_f * y_pred_f)
+  (2 * intersection + smooth) / (k_sum(y_true_f) + k_sum(y_pred_f) + smooth)
+})
+model<-load_model_hdf5(file.path(BASE,"models","m83_80_20.hdf5"), custom_objects = c("bce_dice_loss"= bce_dice_loss, "dice"=dice))
+#model<-load_model_hdf5(file.path(MODEL,"m500_50_12000.hdf5"), custom_objects = c("bce_dice_loss"= bce_dice_loss, "dice"=dice))
+
+BATCH_SIZE =32
+SIZE = 2^7
+```
+
+
+
+
+```{r}
+mask2rle <- function(mm) {
+   idx<- which(mm==1)
+  if (length(idx) == 0) return("")
+  
+  # Make sure  values are sorted
+  idx <- sort(idx)
+  
+  # Array of starting positions and run lengths
+  starts <- c()
+  runs <- c()
+  
+  # Loop
+  starts <- c(starts, idx[1])
+  run <- 1
+  for (i in 2:length(idx)) { #run
+    if (idx[i-1] + 1 == idx[i]) {
+      run <- run + 1
+    } else { #stop
+      runs <- c(runs, run)
+      starts <- c(starts, idx[i])
+      run <- 1
+    }
+  }
+  
+  # Last run length needs special handling
+  runs <- c(runs, run)
+  
+  # Sanity check
+  stopifnot(length(starts) == length(runs))
+  
+  # zip starts and runs as space delimited list
+  return(paste0(mapply(list, paste(starts, runs)), collapse = " "))
+  
+}
+idx2rle <- function(idx) {
+  if (length(idx) == 0) return("")
+  
+  # Make sure  values are sorted
+  idx <- sort(idx)
+  
+  # Array of starting positions and run lengths
+  starts <- c()
+  runs <- c()
+  
+  # Loop
+  starts <- c(starts, idx[1])
+  run <- 1
+  for (i in 2:length(idx)) { #run
+    if (idx[i-1] + 1 == idx[i]) {
+      run <- run + 1
+    } else { #stop
+      runs <- c(runs, run)
+      starts <- c(starts, idx[i])
+      run <- 1
+    }
+  }
+  
+  # Last run length needs special handling
+  runs <- c(runs, run)
+  
+  # Sanity check
+  stopifnot(length(starts) == length(runs))
+  
+  # zip starts and runs as space delimited list
+  return(paste0(mapply(list, paste(starts, runs)), collapse = " "))
+  
+}
+rle2index<- function(code){
+  mask_rle<- train %>% subset(id == code) %>% dplyr::select(encoding) %>% pull
+  sl<- mask_rle   %>% strsplit(" ") %>% .[[1]] %>% as.numeric
+  starts<-sl[seq(1,(length(sl) -1),2)] 
+  lengths<-sl[seq(2,length(sl),2)]
+  ends<-starts + lengths -1
+  #img<- matrix(0,ncol= shape[1] ,nrow=shape[2]  )
+  #img<-imfill(0,x=shape[2],y=shape[1],z=1)
+  ids<-lapply(1:length(starts),function(i){seq(starts[i],ends[i],1)}) %>% unlist
+  ids
+}
+dice_hard<- function(true,pred){
+  ii<-length (intersect(pred,true))
+  dice<- 2 * ii / ( length(pred) + length(true))
+  dice 
+}
+
+rle2mask <- function(mask_rle,shape){
+  sl<- mask_rle   %>% strsplit(" ") %>% .[[1]] %>% as.numeric
+  starts<-sl[seq(1,(length(sl) -1),2)] 
+  lengths<-sl[seq(2,length(sl),2)]
+  ends<-starts + lengths -1
+  img<- matrix(0,ncol= shape[1] ,nrow=shape[2]  )
+  #img<-imfill(0,x=shape[2],y=shape[1],z=1)
+  ids<-lapply(1:length(starts),function(i){seq(starts[i],ends[i],1)}) %>% unlist
+  img[ids]<-1
+ # dim(img)<-c(shape[2],shape[1])
+  img<-  img  #%>%imager::save.image("test.png")
+    # dim(img)<-c(shape[2],shape[1],1)
+    # img %>% image_read() %>% image_write("magictest.png", format = "png")
+  return((img))
+}
+
+```
+
+```{r}
+library(jsonlite)
+
+baseid<-list.files(BASET, full.names = F,pattern = "*.tiff") %>% gsub(pattern = ".tiff",replacement =  "")
+anato<- file.path(BASET, paste0(baseid,"-anatomical-structure.json"))
+img<-file.path(BASET, paste0(baseid,".tiff"))
+jsons<- file.path(BASET, paste0(baseid,".json"))
+
+train<- read_delim(file.path(BASE,"train.csv"), delim = ",")
+test<-read_csv(file.path(BASE,"sample_submission.csv"))
+dataset<- read_csv(file.path(BASE,"HuBMAP-20-dataset_information.csv"))
+
+dj <- tibble(
+  jsons= lapply(jsons ,fromJSON),
+  anato = lapply(anato,fromJSON)
+)
+
+fp<- function(k){
+  ff<-function(xx){
+  out<- xx  %>% .[1,,] %>% as.data.frame
+  }
+  pnames<-dj$anato[[k]]$properties[,1][,1]
+  ptype<-  dj$anato[[k]]$geometry$type
+  geop<- dj$anato[[k]]$geometry$coordinates
+  ip<- which(pnames== "Cortex")
+  cort<-list()
+  for(ipx in ip){
+    if(ptype[ipx]=="Polygon"){
+      cort<-c(list(ff(geop[[ipx]])),cort)
+    }else{
+      cort<-c(map(geop[[ipx]],ff),cort)
+    }
+  }
+  return(cort)
+}
+  
+isCortex<-function(i,j,k){
+  vv<-list(c(i+1,j+1),c(i+SPLIT,j+1),c(i,j+ SPLIT),c(i+SPLIT,j+SPLIT))
+  pp<-fp(k)
+  res<-0
+  for(v in 1:length(vv)){
+    for(p in 1:length(pp)){
+      res<-res+ point.in.polygon(vv[[v]][1],vv[[v]][2],pp[[p]][,1],pp[[p]][,2])
+    }
+  }
+return(res)
+}
+```
+
+
+
+```{r}
+thr = .7
+k=6
+SPLIT=2 ^9
+
+shape<-dataset %>% subset(image_file == paste0(ffnames[k],".tiff" )) %>% dplyr::select(width_pixels, height_pixels) %>% unlist %>% as.vector
+
+# makeMask<-function(i){
+#   mask_rle<- train %>% subset(id == ffnames[i]) %>% dplyr::select(encoding) %>% pull
+#   shape_rle<-dataset %>% subset(image_file == paste0(ffnames[i], ".tiff")) %>% dplyr::select(width_pixels, height_pixels) %>% unlist %>% as.vector
+#   mask<- rle2mask(mask_rle, shape_rle)  %>% as.cimg
+#   return(mask)
+# }
+
+impath<-file.path(BASET,paste0(ffnames[k],".tiff") )
+
+im<-image_read(impath)
+makeimg<-function(i,j,im=im){
+  dest<- paste0(512,"x",512, "+",i, "+", j)
+  imx<- image_crop(im,dest) %>% .[[1]] %>% as.numeric %>% #array(dim=c (1,SIZE,SIZE,3)) %>%
+  tf$image$convert_image_dtype( dtype = tf$float32)  %>%
+  tf$image$resize( size = shape(SIZE,SIZE)) %>% k_expand_dims(axis=1)
+}
+      
+  shape<-dataset %>% subset(image_file == paste0(ffnames[k],".tiff" )) %>% dplyr::select(width_pixels,height_pixels) 
+  ncolsi<-c( seq(0,shape$width_pixels -512, 512), shape$width_pixels-512)
+  nrowsi<-c( seq(0,shape$height_pixels-512, 512) , shape$height_pixels-512)
+  nn<-expand.grid(ncolsi,nrowsi)
+  # walk2(nn[,1],nn[,2],makePng,im=im,mask=mask)
+
+  
+#predsub<-matrix(0, nrow= shape[1],ncol=shape[2])
+
+pb <- txtProgressBar(min = 0, max = nrow(nn), style = 3)
+
+i= which(nn$Var1 ==5633 & nn$Var2 == 8705)
+
+idxt<- vector(mode="integer")
+for(i in seq_len(nrow(nn)) ){
+  img<- makeimg(nn[i,1],nn[i,2],im=im)
+  #if( img %>% as.array %>% max< .2){next}
+  if(isCortex(nn[i,1],nn[i,2],k)==0){next}
+
+  pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>%
+  k_squeeze(axis=1) %>% k_squeeze(axis=3) %>% as.array(dim=c(512,512))
+
+  predx<- pred > thr
+  pred[predx]<-1;pred[!predx]<-0
+ # pred <- pred %>% shrink(50) %>% grow(50)  #%>%as.matrix
+
+
+  ncoli<- nn[i,1];nrowi<-nn[i,2]
+  coord<- which(pred ==1, arr.ind = T) %>% as.data.frame
+    idx<- with(coord, {(col+ncoli-1)*shape$height_pixels + row +nrowi })
+######################################  
+  # true<- small_mask(k,nn[i,1],nn[i,2]) 
+  # truex<-which(true==1)
+  # predx<-which(pred==1)
+  # dice_hard(truex,predx)
+##########################################  
+  idxt<-c(idx,idxt)
+  
+  setTxtProgressBar(pb, i)
+  if(i %%100 ==0){gc()}
+}
+pred <- idxt %>% sort(decreasing = F)
+#evaluation
+true<- rle2index(baseid[k])
+score<-dice_hard(true,idxt)
+
+id1<-baseid[k]
+predicted<-idx2rle(pred)
+
+submission<-tibble(id=id1, predicted=predicted)
+
+# to submit
+# idxt_rle<-idx2rle(pred)
+# res<- tibble(id=ffnames[k], encoding = idxt_rle)
+# saveRDS(res, file = file.path(EVAL,"095bfa1f_rle.RDS"))
+# res<-readRDS(file = file.path(EVAL,"095bfa1f_rle.RDS"))
+# 
+# ttrue <- rle2mask(train %>% subset(id=="095bf7a1f") %>% select(encoding) %>% pull, shape = shape) %>% k_variable()
+# tpred<- rle2mask(res$encoding, shape = shape)%>% k_variable()
+# 
+# xx<- dice(ttrue,tpred) %>% as.array
+```
+cartesian to rle 
+
+```{r}
+a<- matrix((1:20)/20,byrow = F,ncol=4) 
+
+kk<- 2/10
+a[c(15,9)]<-kk
+af<- a %>% array(dim = c(5,4,1)) %>% image_read()
+nrowi=2
+ncoli=1
+dest<- paste0(3,"x",3, "+",ncoli, "+", nrowi) # + with(col) + height(row)
+
+acut<- image_crop(af,dest)
+shapea<-dim(a)
+
+window<- acut[[1]] %>%  as.numeric() %>% .[,,1]
+coord<- which(window == .2, arr.ind = T)
+d<- apply(coord, 1,function(row){(row[2]+ncoli-1)*shapea[1] + row[1]+nrowi})
+
+
+a
+window
+coord
+d
+
+
+```
+
+```{r}
+
+fcc<-function(img,pred){
+  out<-colorise(img,pred,"blue",alpha = .3)
+  out
+}
+
+out.pred<- map2(img,pred, fcc) %>% imappend(axis="x")
+out.true<- map2(images$image, images$mask, fcc) %>% imappend(axis="x")
+out<-imappend(list(out.pred,out.true),axis = "y")
+```
+```{command}
+!wget 'https://www.kaggle.com/c/cassava-leaf-disease-classification/leaderboard.json?includeBeforeUser=true&includeAfterUser=false' -O cassava_leaderboard.json
+
+```
+

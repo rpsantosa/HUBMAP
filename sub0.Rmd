@@ -1,0 +1,774 @@
+---
+title: "Submission 0"
+output: html_notebook
+---
+This link shows a lot of views of glomeruli
+[link](https://www.renalfellow.org/2019/02/11/kidney-biopsy-of-the-month-the-tubulointerstitium-part-1-the-cortex/)
+and [here](https://www.renalfellow.org/2019/03/15/kidney-biopsy-of-the-month-the-tubulointerstitium-part-2-the-medulla/)
+
+
+py_install("imagecodecs --target =./ii ") works like !pip install imagecodecs --target = 
+
+py_install(" download facenet-pytorch -d ./facenet_pytorch/ ")
+
+
+
+```{r}
+
+
+
+
+library(tensorflow)
+library(keras)
+library(tfdatasets)
+library(tidyverse)
+library(reticulate)
+library(magick)
+library(imager)
+library(dplyr)
+library(sp)
+library(jsonlite)
+#library(tiff)
+
+#import("imagecodecs", convert=F)
+
+MASKT<- file.path("c:/kaggletemp/HuBMAP/train_images/")
+MASK<- file.path("c:/kaggletemp/HuBMAP/mask_images/")
+TEST<- file.path("c:/kaggletemp/HuBMAP/test/")
+BASE<-file.path("c:/kaggletemp/HuBMAP/")
+TRAIN<-file.path("c:/kaggletemp/HuBMAP/train/")
+EVAL<-file.path("c:/kaggletemp/HuBMAP/evaluation/")
+MODEL<-file.path("c:/kaggletemp/HuBMAP/models/")
+
+
+gpu_devices =  tf$config$experimental$list_physical_devices("GPU")[[1]]
+tf$config$experimental$set_memory_growth(gpu_devices, T)
+
+tiff<- import("tifffile", convert = F)
+# np<- import("numpy", convert=F)
+
+bce_dice_loss <- function(y_true, y_pred) {
+    result <- loss_binary_crossentropy(y_true, y_pred) +
+        (1 - dice(y_true, y_pred))
+    return(result)
+} 
+
+dice <- custom_metric("dice", function(y_true, y_pred, smooth = 1e-5) {
+  y_true_f <- k_flatten(y_true)
+  y_pred_f <- k_flatten(y_pred)
+  intersection <- k_sum(y_true_f * y_pred_f)
+  (2 * intersection + smooth) / (k_sum(y_true_f) + k_sum(y_pred_f) + smooth)
+})
+model<-load_model_hdf5(file.path(BASE,"models","m83_80_20.hdf5"), custom_objects = c("bce_dice_loss"= bce_dice_loss, "dice"=dice))
+#model<-load_model_hdf5(file.path(MODEL,"m500_50_12000.hdf5"), custom_objects = c("bce_dice_loss"= bce_dice_loss, "dice"=dice))
+
+BATCH_SIZE =32
+SIZE = 2^7
+
+
+
+baseid<-list.files(TRAIN, full.names = F,pattern = "*.tiff") %>% gsub(pattern = ".tiff",replacement =  "")
+anato<- file.path(TRAIN, paste0(baseid,"-anatomical-structure.json"))
+img<-file.path(TRAIN, paste0(baseid,".tiff"))
+
+#train<- read_delim(file.path(BASE,"train.csv"), delim = ",")
+test<-read_csv(file.path(BASE,"sample_submission.csv"))
+dataset<- read_csv(file.path(BASE,"HuBMAP-20-dataset_information.csv"))
+
+dj <- tibble(
+  anato = lapply(anato,fromJSON)
+)
+b<- tibble(baseid=baseid, size = list.files(TRAIN, full.names = T,pattern = "*.tiff") %>% file.size/1e9, k = 1: length(baseid))
+
+
+
+x<- lapply(1:length(baseid), function(i)dj$anato[[i]]$geometry$type)
+x<- lapply(1:length(baseid), function(i)dj$anato[[i]]$properties)
+
+ #map(1:length(dj$anato),function(x)dj$anato[[x]]$properties)
+#fp(3)
+
+```
+
+##Functions
+
+```{r}
+mask2rle <- function(mm) {
+   idx<- which(mm==1)
+  if (length(idx) == 0) return("")
+  
+  # Make sure  values are sorted
+  idx <- sort(idx)
+  
+  # Array of starting positions and run lengths
+  starts <- c()
+  runs <- c()
+  
+  # Loop
+  starts <- c(starts, idx[1])
+  run <- 1
+  for (i in 2:length(idx)) { #run
+    if (idx[i-1] + 1 == idx[i]) {
+      run <- run + 1
+    } else { #stop
+      runs <- c(runs, run)
+      starts <- c(starts, idx[i])
+      run <- 1
+    }
+  }
+  
+  # Last run length needs special handling
+  runs <- c(runs, run)
+  
+  # Sanity check
+  stopifnot(length(starts) == length(runs))
+  
+  # zip starts and runs as space delimited list
+  return(paste0(mapply(list, paste(starts, runs)), collapse = " "))
+  
+}
+idx2rle <- function(idx) {
+  if (length(idx) == 0) return("")
+  
+  # Make sure  values are sorted
+  idx <- sort(idx)
+  
+  # Array of starting positions and run lengths
+  starts <- c()
+  runs <- c()
+  
+  # Loop
+  starts <- c(starts, idx[1])
+  run <- 1
+  for (i in 2:length(idx)) { #run
+    if (idx[i-1] + 1 == idx[i]) {
+      run <- run + 1
+    } else { #stop
+      runs <- c(runs, run)
+      starts <- c(starts, idx[i])
+      run <- 1
+    }
+  }
+  
+  # Last run length needs special handling
+  runs <- c(runs, run)
+  
+  # Sanity check
+  stopifnot(length(starts) == length(runs))
+  
+  # zip starts and runs as space delimited list
+  return(paste0(mapply(list, paste(starts, runs)), collapse = " "))
+  
+}
+rle2index<- function(code){
+  mask_rle<- train %>% subset(id == code) %>% dplyr::select(encoding) %>% pull
+  sl<- mask_rle   %>% strsplit(" ") %>% .[[1]] %>% as.numeric
+  starts<-sl[seq(1,(length(sl) -1),2)] 
+  lengths<-sl[seq(2,length(sl),2)]
+  ends<-starts + lengths -1
+  #img<- matrix(0,ncol= shape[1] ,nrow=shape[2]  )
+  #img<-imfill(0,x=shape[2],y=shape[1],z=1)
+  ids<-lapply(1:length(starts),function(i){seq(starts[i],ends[i],1)}) %>% unlist
+  ids
+}
+dice_hard<- function(true,pred){
+  ii<-length (intersect(pred,true))
+  dice<- 2 * ii / ( length(pred) + length(true))
+  dice 
+}
+
+rle2mask <- function(mask_rle,shape){
+  sl<- mask_rle   %>% strsplit(" ") %>% .[[1]] %>% as.numeric
+  starts<-sl[seq(1,(length(sl) -1),2)] 
+  lengths<-sl[seq(2,length(sl),2)]
+  ends<-starts + lengths -1
+  img<- matrix(0,ncol= shape[1] ,nrow=shape[2]  )
+  #img<-imfill(0,x=shape[2],y=shape[1],z=1)
+  ids<-lapply(1:length(starts),function(i){seq(starts[i],ends[i],1)}) %>% unlist
+  img[ids]<-1
+ # dim(img)<-c(shape[2],shape[1])
+  img<-  img  #%>%imager::save.image("test.png")
+    # dim(img)<-c(shape[2],shape[1],1)
+    # img %>% image_read() %>% image_write("magictest.png", format = "png")
+  return((img))
+}
+
+
+fp<- function(k){
+  ff<-function(xx){
+  out<- xx  %>% .[1,,] %>% as.data.frame
+  }
+  pnames<-dj$anato[[k]]$properties[,1][,1]
+  ptype<-  dj$anato[[k]]$geometry$type
+  geop<- dj$anato[[k]]$geometry$coordinates
+  ip<- grep("ortex",pnames)        #which(pnames== "Cortex")
+  cort<-list()
+  for(ipx in ip){
+    if(ptype[ipx]=="Polygon"){
+      cort<-c(list(ff(geop[[ipx]])),cort)
+    }else{
+      cort<-c(map(geop[[ipx]],ff),cort)
+    }
+  }
+  return(cort)
+}
+  
+fpx<- function(k){
+  ff<-function(xx){
+  out<- xx  %>% .[1,,] %>% as.data.frame
+  }
+  pnames<-dj$anato[[k]]$properties[,1][,1]
+  ptype<-  dj$anato[[k]]$geometry$type
+  geop<- dj$anato[[k]]$geometry$coordinates
+  ip<- grep("ortex",pnames)        #which(pnames== "Cortex")
+  cort<-list()
+  for(ipx in 1:length(pnames)){
+    if(ptype[ipx]=="Polygon"){
+      cort<-c(list(ff(geop[[ipx]])),cort)
+    }else{
+      cort<-c(map(geop[[ipx]],ff),cort)
+    }
+  }
+  return(cort)
+}
+
+# isCortexFast<- function(i,j,k,SPLIT){
+#   ff<-function(xx){
+#   out<- xx  %>% .[1,,] %>% as.data.frame
+#   }
+#   pnames<-dj$anato[[k]]$properties[,1][,1]
+#   ptype<-  dj$anato[[k]]$geometry$type
+#   geop<- dj$anato[[k]]$geometry$coordinates
+#   ip<- grep("ortex",pnames)        #which(pnames== "Cortex")
+#   cort<-list()
+#   for(ipx in pnames){
+#     if(ptype[ipx]=="Polygon"){
+#       cort<-c(list(ff(geop[[ipx]])),cort)
+#     }else{
+#       cort<-c(map(geop[[ipx]],ff),cort)
+#     }
+#   }
+#   #V1=width, V2=height
+#   max_w<-lapply(x,function(x)max(x[,1]))
+#   min_w<-lapply(x,function(x)min(x[,1]))
+#   max_h<-lapply(x,function(x)max(x[,1]))
+#   min_h<-lapply(x,function(x)min(x[,1]))
+#   vv<-list(c(i+1,j+1),c(i+SPLIT,j+1),c(i,j+ SPLIT),c(i+SPLIT,j+SPLIT))
+#   fin<- function(x){
+#     x %inr% 
+#   }
+#   
+#   return(res)
+# }
+
+
+
+isCortex<-function(i,j,k,SPLIT){
+  vv<-list(c(i+1,j+1),c(i+SPLIT,j+1),c(i,j+ SPLIT),c(i+SPLIT,j+SPLIT))
+  pp<-fp(k)
+  res<-0
+  for(v in 1:length(vv)){
+    for(p in 1:length(pp)){
+      res<-res+ point.in.polygon(vv[[v]][1],vv[[v]][2],pp[[p]][,1],pp[[p]][,2])
+    }
+  }
+return(res)
+}
+
+makeimg<-function(i,j,im=im){
+  dest<- paste0(512,"x",512, "+",i, "+", j)
+  imx<- image_crop(im,dest) %>% .[[1]] %>% as.numeric %>% #array(dim=c (1,SIZE,SIZE,3)) %>%
+  tf$image$convert_image_dtype( dtype = tf$float32)  %>%
+  tf$image$resize( size = shape(SIZE,SIZE)) %>% k_expand_dims(axis=1)
+}
+create_dataset <- function(data, train, batch_size = BATCH_SIZE) {
+  
+  dataset <- data %>% 
+    tensor_slices_dataset() %>% 
+   dataset_map(~.x %>% list_modify(
+    img = tf$image$decode_png(tf$io$read_file(.x$img)),
+    mask =tf$image$decode_png(tf$io$read_file(.x$mask))
+  ))%>% 
+  dataset_map(~.x %>% list_modify(
+    img = tf$image$convert_image_dtype(.x$img, dtype = tf$float32),
+    mask = tf$image$convert_image_dtype(.x$mask, dtype = tf$float32)
+  )) %>%
+      dataset_map(~.x %>% list_modify(
+      img = tf$image$resize(.x$img, size = shape(SIZE, SIZE)),
+      mask = tf$image$resize(.x$mask, size = shape(SIZE, SIZE))[,,1,drop=F]
+    ))
+
+  if (train) {
+    dataset <- dataset %>% 
+      dataset_shuffle(buffer_size = batch_size*2^4)
+  }
+  
+  # train in batches; batch size might need to be adapted depending on
+  # available memory
+  dataset <- dataset %>% 
+    dataset_batch(batch_size) %>%
+    dataset_prefetch(1)
+  
+  dataset %>% 
+    # output needs to be unnamed
+    dataset_map(unname) 
+}
+
+to_single_predict<-function(i,j,im=im){
+  #im:  dim[1]= high, dim[2]= width 
+  #dest<- paste0(512,"x",512, "+",i, "+", j)
+  #imx<- image_crop(im,dest) %>% .[[1]] %>% as.numeric %>% #array(dim=c (1,SIZE,SIZE,3)) %>%
+  shape<- dim(im)
+  
+  if(shape[1]==3L){
+  imx<-im[,(i+1L):(i+512L),(j+1L):(j+512L)] %>%
+    k_permute_dimensions(c(2L,3L,1L)) %>%
+    tf$image$convert_image_dtype(.,tf$float32)
+  }else
+  {imx<-im[(i+1L):(i+512L),(j+1L):(j+512L),] %>%
+    tf$image$convert_image_dtype(.,tf$float32) 
+    
+  }
+  
+ imx<- imx  %>%
+  tf$image$resize( size = shape(SIZE,SIZE)) %>% k_expand_dims(axis=1L)
+ imx
+}
+
+to_batch_predict<-function(i,j,im=im){
+  #im:  dim[1]= high, dim[2]= width 
+  #dest<- paste0(512,"x",512, "+",i, "+", j)
+  #imx<- image_crop(im,dest) %>% .[[1]] %>% as.numeric %>% #array(dim=c (1,SIZE,SIZE,3)) %>%
+  shape<- dim(im)
+  
+  if(shape[1]==3L){
+  imx<-im[,(i+1L):(i+512L),(j+1L):(j+512L)] %>%
+    k_permute_dimensions(c(2L,3L,1L)) %>%
+    tf$image$convert_image_dtype(.,tf$float32)
+  }else
+  {imx<-im[(i+1L):(i+512L),(j+1L):(j+512L),] %>%
+    tf$image$convert_image_dtype(.,tf$float32) 
+    
+  }
+  
+ imx<- imx  %>%
+  tf$image$resize( size = shape(SIZE,SIZE)) 
+ imx
+}
+
+make_nn<-function(shape){
+  if(shape[1]==3){
+    ncolsi<-c( seq(0L,shape[3] -512L, 512L), shape[3] -512L)
+    nrowsi<-c( seq(0L,shape[2]-512L, 512L) , shape[2]-512L)
+    nn<-expand.grid(nrowsi, ncolsi) 
+  }else{
+    ncolsi<-c( seq(0L,shape[2] -512L, 512L), shape[2] -512L)
+    nrowsi<-c( seq(0L,shape[1]-512L, 512L) , shape[1]-512L)
+    nn<-expand.grid(nrowsi, ncolsi)
+  }
+    return(nn)
+}
+```
+
+
+```{r}
+BATCH_SIZE=10
+create_dataset_k <- function(k, batch_size = BATCH_SIZE) {
+ thr <-  .7
+  SPLIT<- 2 ^9
+  impath<-file.path(TRAIN,paste0(baseid[k],".tiff") )
+  im<- tiff$imread(impath) 
+  im<- im$squeeze() 
+  im<- im %>%  tf$constant(.)
+  gc()
+  shape=dim(im)
+  if(shape[1] ==3){ 
+    height<-shape[2];width <- shape[3]} else{
+      height<- shape[1]; width<- shape[2]}
+  #shape<- dim(im)
+  #if(shape[1]==3){height <- shape[2]}else{height<- shape[1]}
+  nn<-make_nn(c(height,width))
+  
+  
+  preprocess<-function(hw){
+    hh<-hw$height
+    ww<-hw$width 
+    out<- to_batch_predict(hh,ww,im)
+    list(out,hh,ww)
+  }
+  
+  indices_cortex<- map2(nn[,1],nn[,2], isCortex,k,SPLIT) %>% unlist >0
+  dataset<-nn[indices_cortex,] %>% as_tibble %>% rename(height=Var1,width=Var2) %>% 
+    tensor_slices_dataset() 
+  dataset<- dataset %>% dataset_map(preprocess) %>% dataset_batch(batch_size)
+    
+}
+    
+
+
+
+  
+#   
+#   idxt<- vector(mode="integer")
+#   for(i in seq_len(nrow(nn_cortex)) ){
+#     img<- to_tensorflow(nn_cortex[i,1],nn_cortex[i,2],im=im) # fist height then width
+#   
+#   # img<- makeimg(nncortex[i,1],nncortex[i,2],im=im)
+#   dataset <- data %>% 
+#   tensor_slices_dataset() %>% 
+#   dataset_map(~.x %>% list_modify(
+#     z<- .x$ncolsi * 100 %>% as.array
+#    #img<- makeimg(.x$ncolsi,.x$nrowsi,im=im)
+#   # img<- image_crop(im,paste0(512,"x",512, "+",.x$ncolsi, "+", .x$nrowsi) ) %>%
+#   # .[[1]] %>% as.numeric %>% 
+#   # tf$image$convert_image_dtype( dtype = tf$float32)  %>%
+#   # tf$image$resize( size = shape(SIZE,SIZE)) %>% k_expand_dims(axis=1)
+#   ))
+#        
+#   # train in batches; batch size might need to be adapted depending on
+#   # available memory
+#   dataset <- dataset %>% 
+#     dataset_batch(batch_size) %>%
+#     dataset_prefetch(1)
+#   
+#   dataset %>% 
+#     # output needs to be unnamed
+#     dataset_map(unname) 
+# }
+
+```
+
+
+```{r}
+sub<-function(k){
+  thr <-  .7
+  SPLIT<- 2 ^9
+  impath<-file.path(TRAIN,paste0(baseid[k],".tiff") )
+  # im<-read_file_raw(impath) %>% image_read
+  #im<-image_read(impath)
+  #im<-readTIFF(impath, convert=T)
+  im<- tiff$imread(impath) 
+  im<- im$squeeze() 
+  #dim0<- im$shape %>% py_to_r  %>% .[[1]]
+  #gc()
+  # if(dim0 ==3){ 
+  #     im<- np$transpose(im,c(2L,1L,0L ) )
+  #   #im<- im$transpose(1L,2L,0L)
+  #  # im<- tf$transpose(im,c(1L,2L,0L))
+  # } 
+  im<- im %>%  tf$constant(.)
+  gc()
+  shape=dim(im)
+  if(shape[1] ==3){ 
+    height<-shape[2];width <- shape[3]} else{
+      height<- shape[1]; width<- shape[2]}
+  #shape<- dim(im)
+  #if(shape[1]==3){height <- shape[2]}else{height<- shape[1]}
+  nn<-make_nn(c(height,width))
+  indices_cortex<- map2(nn[,1],nn[,2], isCortex,k,SPLIT) %>% unlist >0
+  nn_cortex<-nn[indices_cortex,]
+  pb <- txtProgressBar(min = 0, max = nrow(nn_cortex), style = 3)
+  # i= which(nn$Var1 ==5633 & nn$Var2 == 8705)
+  idxt<- vector(mode="integer")
+  for(i in seq_len(nrow(nn_cortex)) ){
+    img<- to_single_predict(nn_cortex[i,1],nn_cortex[i,2],im=im) # fist height then width
+    #if( img %>% as.array %>% max< .2){next}
+   # cortex <- isCortex(nn[i,2],nn[i,1],k,SPLIT)==0
+    #  cortex<-  tryCatch( isCortex(nn[i,2],nn[i,1],k,SPLIT),
+    #              error = function(e) {
+    #                 out<- 1
+    #               },
+    #             warning = function(w){
+    #                      message("A warning occured:\n", w)
+    #                  })  
+    # 
+    # 
+    # if(cortex==0){next}
+    pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>% tf$squeeze(.) %>% as.array
+    predx<- pred > thr
+    pred[predx]<-1;pred[!predx]<-0
+
+    ncoli<- nn[i,2];nrowi<-nn[i,1]
+      
+    coord<- which(pred ==1, arr.ind = T) %>% as.data.frame
+    idx<- with(coord, {(col+ncoli-1)* height + row +nrowi })#shape$height_pixels
+ 
+  ######################################  
+    # true<- small_mask(k,nn[i,1],nn[i,2]) 
+    # truex<-which(true==1)
+    # predx<-which(pred==1)
+    # dice_hard(truex,predx)
+  ##########################################  
+    idxt<-c(idx,idxt)
+    #cat(i,"\t")
+    setTxtProgressBar(pb, i)
+    if(i %%50 ==0){gc()}
+  }
+  rm(im)
+  gc()
+  pred <- idxt %>% sort(decreasing = F)
+  pred<-idx2rle(pred)
+  pred
+}
+#evaluation
+
+
+# #evaluation
+# true<- rle2index(baseid[k])
+# score<-dice_hard(true,idxt)
+
+
+```
+```{r}
+
+sub_catch = possibly(.f = sub, otherwise = "10 2 20 3")
+
+predicted<-map(1: length(baseid),sub_catch)
+
+
+sub<-tibble(id=baseid,predicted=predicted %>% unlist)
+#submission<- test %>% left_join(sub, by="id") %>% select(id, predicted.y) %>% rename(predicted= predicted.y)
+
+
+# sub<-tibble(id=baseid ,predicted=predicted %>% unlist)
+# submission<- test %>% left_join(sub, by="id") %>% select(id, predicted.y) %>% rename(predicted= predicted.y)
+
+write_csv(sub,"submission.csv")
+```
+
+
+
+```{r}
+
+subxx<-function(k){
+  thr <-  .7
+  SPLIT<- 2 ^9
+  impath<-file.path(TRAIN,paste0(baseid[k],".tiff") )
+
+  im<- tiff$imread(impath) 
+  im<- im$squeeze() 
+
+  im<- im %>%  tf$constant(.)
+  gc()
+  shape=dim(im)
+  if(shape[1] ==3){ 
+    height<-shape[2];width <- shape[3]} else{
+      height<- shape[1]; width<- shape[2]}
+  #shape<- dim(im)
+  #if(shape[1]==3){height <- shape[2]}else{height<- shape[1]}
+  nn<-make_nn(c(height,width))
+  indices_cortex<- map2(nn[,1],nn[,2], isCortex,k,SPLIT) %>% unlist >0
+  nn_cortex<-nn[indices_cortex,]
+  #pb <- txtProgressBar(min = 0, max = nrow(nn_cortex), style = 3)
+  # i= which(nn$Var1 ==5633 & nn$Var2 == 8705)
+  idxt<- vector(mode="integer")
+  
+  # for(i in seq_len(nrow(nn_cortex)) ){
+  #   img<- to_single_predict(nn_cortex[i,1],nn_cortex[i,2],im=im) # fist height then width
+  # 
+  #   pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>% np$squeeze(.) %>% as.array
+  #   predx<- pred > thr
+  #   pred[predx]<-1;pred[!predx]<-0
+  # 
+  #   ncoli<- nn[i,2];nrowi<-nn[i,1]
+  #     
+  #   coord<- which(pred ==1, arr.ind = T) %>% as.data.frame
+  #   idx<- with(coord, {(col+ncoli-1)* height + row +nrowi })#shape$height_pixels
+  # 
+  #   idxt<-c(idx,idxt)
+  #   #cat(i,"\t")
+  #   setTxtProgressBar(pb, i)
+  #   if(i %%50 ==0){gc()}
+  # }
+  ffs<-function(i){
+    img<- to_single_predict(nn_cortex[i,1],nn_cortex[i,2],im) # fist height then width
+
+    pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>% np$squeeze(.) %>% as.array
+    predx<- pred > thr
+    pred[predx]<-1;pred[!predx]<-0
+
+    ncoli<- nn[i,2];nrowi<-nn[i,1]
+      
+    coord<- which(pred ==1, arr.ind = T) %>% as.data.frame
+    idx<- with(coord, {(col+ncoli-1)* height + row +nrowi })#shape$height_pixels
+
+    return(idx)
+  }
+  
+  options <- furrr_options(seed = 123)
+  plan(multisession, workers = 3)
+  idxt<-future_map(seq_len(nrow(nn_cortex)) ,ffs,shape)
+  plan(sequential)
+
+  rm(im)
+  gc()
+  pred <- idxt %>% sort(decreasing = F)
+  pred<-idx2rle(pred)
+  pred
+}
+#evaluation
+
+#predicted<-map(1:length(baseid),sub)
+```
+```{r}
+sub_catch = possibly(.f = sub, otherwise = "10 2 20 3")
+options <- furrr_options(seed = 123)
+plan(multisession, workers = 3)
+
+predicted<-future_map(1: length(baseid),sub,.options = options)
+plan(sequential)
+
+```
+
+
+
+```{r}
+subd<- sub %>% as.data.frame
+write.csv(subd,file="submissiond.csv" ,row.names = F, quote=F)
+```
+
+
+```{r}
+k=1
+  impath<-file.path(TEST,paste0(baseid[k],".tiff") )
+    shape<-dataset %>% subset(image_file == paste0(baseid[k],".tiff" )) %>% dplyr::select(width_pixels,height_pixels) 
+
+  # im<-read_file_raw(impath) %>% image_read
+  #im<-readTIFF(  impath, convert= T, info = T)
+```
+
+
+```{r}
+  wh <- c(shape$height_pixels, shape$width_pixels)
+
+## I think the offset is 18, not 20 because
+file.info(impath)$size/2 - 18
+#[1] 1428288
+prod(wh) *3
+#> [1] 1428288
+
+v <- readBin(impath, what = "integer", 
+             n = prod(wh) + 1632, size = 2,  
+             signed = TRUE, endian = "little")
+v <- v[-(1:1632)]  ## drop the offset bytes
+
+## check the values
+range(v)
+```
+
+
+```{r}
+start<- proc.time()
+im<-readTIFF(  impath, convert= T)
+end<- proc.time()
+ll <- end-start
+ll[3]
+
+
+start<- proc.time()
+im<-readTIFF(  read_file_raw( impath), convert= T)
+end<- proc.time()
+ll <- end-start
+ll[3]
+```
+
+```{r}
+
+x<- lapply(1:length(baseid), function(x)dj$anato[[i]]$properties)
+```
+
+
+```{r}
+pred_df <- tryCatch(generate_predictions(test_df),
+                        
+     error = function(e) {
+        out<- test_df[,answered_correctly:= .4324]
+        out<- test_df %>%  select(row_id,answered_correctly) %>% as.data.frame
+      },
+    warning = function(w){
+             message("A warning occured:\n", w)
+         },
+    finally = {
+           message("Finally done!")
+})
+```
+
+
+
+```{r}
+
+
+library(tensorflow)
+library(keras)
+library(tfdatasets)
+library(tidyverse)
+library(reticulate)
+library(dplyr)
+library(sp)
+library(jsonlite)
+
+py_install(" ../input/imagecodecs-python37-manylinux/imagecodecs-2021.2.26-cp37-cp37m-manylinux2014_x86_64.whl ")
+py_run_string("
+import sys
+sys.path.append('/usr/local/share/.virtualenvs/r-reticulate')
+")
+#ic<- 
+
+TEST<- file.path("../input/hubmap-kidney-segmentation/test")
+BASE<-file.path("../input/hubmap-kidney-segmentation/")
+
+tiff<- import_from_path("tifffile", path = "../input/tifffile-04-march-2021/tifffile-2021.3.4-py3-none-any.whl", convert = F)
+np<- import("numpy", convert = F)
+
+
+baseid<-list.files(TEST, full.names = F,pattern = "*.tiff") %>% gsub(pattern = ".tiff",replacement =  "")
+anato<- file.path(TEST, paste0(baseid,"-anatomical-structure.json"))
+img<-file.path(TEST, paste0(baseid,".tiff"))
+
+#train<- read_delim(file.path(BASE,"train.csv"), delim = ",")
+test<-read_csv(file.path(BASE,"sample_submission.csv"))
+dataset<- read_csv(file.path(BASE,"HuBMAP-20-dataset_information.csv"))
+
+dj <- tibble(
+  anato = lapply(anato,fromJSON)
+)
+k=1
+
+  thr <-  .7
+  SPLIT<- 2 ^9
+  impath<-file.path(TEST,paste0(baseid[k],".tiff") )
+  # im<-read_file_raw(impath) %>% image_read
+  #im<-image_read(impath)
+  #im<-readTIFF(impath, convert=T)
+  im<- tiff$imread(impath) 
+#list.files("/usr/local/share/.virtualenvs/r-reticulate/", pattern = "*.whl", recursive = T)
+  
+  
+  
+  py_run_string("
+sys.path.append('/usr/local/share/.virtualenvs/r-reticulate')
+sys.path.append('../input/imagecodecs-python37-manylinux/imagecodecs-2021.2.26-cp37-cp37m-manylinux2014_x86_64.whl')
+sys.path.append('../input/tifffile-04-march-2021/tifffile-2021.3.4-py3-none-any.whl')
+import imagecodecs as ic
+import tifffile as tiff
+
+")
+  
+  
+  py_run_string("
+import sys
+sys.path.append('/usr/local/share/.virtualenvs/r-reticulate')
+")
+  
+  
+  py_run_string("
+sys.path.append('/usr/local/share/.virtualenvs/r-reticulate')
+sys.path.append('../input/imagecodecs-all/imagecodecs-2021.2.26-cp37-cp37m-win_amd64 (2).whl')
+import imagecodecs as ic
+
+")
+```
+
+
+
+

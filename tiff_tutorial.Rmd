@@ -1,0 +1,117 @@
+---
+title: 'Loading big .tiff files on R notebooks for this competition '
+output:
+  html_document:
+    df_print: paged
+---
+
+
+THe python tifffile can be downloaded [here. ](https://pypi.org/project/tifffile/#modal-close )
+In order to make it ready to import from kaggle notebooks, we need to upload it as dataset, so
+we can run the notebook offline  ( requirement to make a valid submission)
+First we will need some packages, reticulate included:
+```{r}
+
+library(tensorflow)
+library(keras)
+library(tfdatasets)
+library(tidyverse)
+library(reticulate)
+library(dplyr)
+
+
+```
+the tifffile module can be loaded using a nice function from reticulate
+The option `convert =F` is important to keep object in the efficient python version
+```{r}
+TEST<- file.path("c:/kaggletemp/HuBMAP/test/")
+BASE<-file.path("c:/kaggletemp/HuBMAP/")
+tiff<- import("tifffile", convert = F)
+# 
+# TEST<- file.path("../input/hubmap-kidney-segmentation/test")
+# BASE<-file.path("../input/hubmap-kidney-segmentation/")
+#tiff<- import_from_path("tifffile", path = "../input/tifffile-04-march-2021/tifffile-2021.3.4-py3-none-any.whl", convert = F)
+
+```
+
+
+Now, lets choose a large .tiff file
+```{r}
+
+SIZE = 2^7
+baseid<-list.files(TEST, full.names = F,pattern = "*.tiff") %>% gsub(pattern = ".tiff",replacement =  "")
+b<- tibble(baseid=baseid, size = list.files(TEST, full.names = T,pattern = "*.tiff") %>% file.info %>% .$size, k = 1: length(baseid))
+b
+```
+
+### Now, here the reticulate package do a great job. It reads the `.tiff` file and return a object in uint8, what is way more memory efficient. ( a numpy array)
+```{r}
+k=1
+impath<-file.path(TEST,paste0(baseid[k],".tiff") )
+
+im<- tiff$imread(impath)  
+
+im
+im$shape
+```
+
+It is interesting to note that, this kind of object is like native for tensorflow( python native) and keras 
+and can be converted direct to a tensorflow object, so that we can manipulate it in R:
+```{r}
+im <-  tf$constant(im)
+im
+```
+Now, the object is in uint8 format( integers from 0 to 255). If we try to convert to float32 mapped to (0,1) range,
+it will overlow the system memory ( all 32GB on my system. )
+But we can convert to flat32 to manipulate small chuncks to make predicitions and to train any tensorflow/machine learning codes:
+
+```{r}
+to_tensorflow<-function(i,j,im=im){
+  #im:  dim[1]= high, dim[2]= width 
+  #dest<- paste0(512,"x",512, "+",i, "+", j)
+  #imx<- image_crop(im,dest) %>% .[[1]] %>% as.numeric %>% #array(dim=c (1,SIZE,SIZE,3)) %>%
+  shape<- dim(im)
+  
+  if(shape[1]==3){
+  imx<-im[,(i+1):(i+512),(j+1):(j+512)] %>%
+    k_permute_dimensions(c(2,3,1)) %>%
+    tf$image$convert_image_dtype(.,tf$float32)
+  }else
+  {imx<-im[(i+1):(i+512),(j+1):(j+512),] %>%
+    tf$image$convert_image_dtype(.,tf$float32) 
+    
+  }
+  
+ imx<- imx  %>%
+  tf$image$resize( size = shape(SIZE,SIZE)) %>% k_expand_dims(axis=1)
+ imx
+}
+```
+
+
+Taking i = 1000 for example:
+```{r}
+i=dim(im)[2]/2
+j=dim(im)[3]/2
+img<- to_tensorflow(i,j,im)
+img
+```
+
+Now we have a window 128x128 in shape (1,128,128,3) in tf$float32 that we can process as we see fit.
+for expample, we can plot to take a look:
+
+```{r}
+library(imager)
+library(magick)
+img %>% .[1,,,] %>%k_expand_dims(3)%>% as.array %>% as.cimg(.) %>% plot  #( imager transpose/rotates images 90 degrees because it gets the firt dimention as width, not height  before print/save)
+#or
+img %>% .[1,,,] %>% as.array %>% as.raster %>% plot
+#or
+img %>% .[1,,,] %>% as.array %>% image_read %>% plot
+
+
+```
+
+
+
+

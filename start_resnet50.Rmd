@@ -1,0 +1,883 @@
+
+```{r}
+
+# tensorflow::install_tensorflow(extra_packages='pillow',version = "2.4.0")
+
+
+
+library(unet)
+library(tensorflow)
+library(keras)
+library(tfdatasets)
+library(tidyverse)
+library(rsample)
+library(reticulate)
+library(magick)
+library(imager)
+
+TRAIN<- file.path("c:/kaggletemp/HuBMAP/train_images/")
+MASK<- file.path("c:/kaggletemp/HuBMAP/mask_images/")
+TEST<- file.path("c:/kaggletemp/HuBMAP/test/")
+BASE<-file.path("c:/kaggletemp/HuBMAP/")
+BASET<-file.path("c:/kaggletemp/HuBMAP/train/")
+EVAL<-file.path("c:/kaggletemp/HuBMAP/evaluation/")
+
+gpu_devices =  tf$config$experimental$list_physical_devices("GPU")[[1]]
+tf$config$experimental$set_memory_growth(gpu_devices, T)
+
+#model<-load_model_hdf5(file.path(BASE,"models"), custom_objects = c("bce_dice_loss"= bce_dice_loss, "dice"=dice))
+
+```
+```{r}
+bce_dice_loss <- function(y_true, y_pred) {
+    result <- loss_binary_crossentropy(y_true, y_pred) +
+        (1 - dice(y_true, y_pred))
+    return(result)
+} 
+
+dice <- custom_metric("dice", function(y_true, y_pred, smooth = 0) {
+  y_true_f <- k_flatten(y_true)
+  y_pred_f <- k_flatten(y_pred)
+  intersection <- k_sum(y_true_f * y_pred_f)
+  (2 * intersection + smooth) / (k_sum(y_true_f) + k_sum(y_pred_f) + smooth)
+})
+#model<-load_model_hdf5(file.path(BASE,"models","m8774.hdf5"), custom_objects = c("bce_dice_loss"= bce_dice_loss, "dice"=dice))
+#model<-load_model_hdf5(file.path(EVAL,"m500_50_12000.hdf5"), custom_objects = c("bce_dice_loss"= bce_dice_loss, "dice"=dice))
+
+BATCH_SIZE =4
+SIZE = 2^7
+
+```
+
+lets filter the images < 300k (they are all artefacts)
+
+```{r}
+# ###################################################################################################
+# #train
+# 
+# xt <- list.files(TRAIN,full.names = TRUE)
+# xt<- xt[sapply(xt, file.size) > 300000]
+# extt<- xt %>% map( . %>% gsub(pattern = file.path(TRAIN,"image"), replacement = ""))
+# msk<-   paste0(file.path(MASK,"mask"),extt) %>% unlist
+# imagest <- tibble(
+#   img = xt,
+#   mask =msk
+#   ) %>%
+#   sample_n(3) %>%
+#   map(. %>% magick::image_read() %>% magick::image_resize("128x128"))
+# 
+# out <- magick::image_append(c(
+#   magick::image_append(imagest$img, stack = TRUE),
+#   magick::image_append(imagest$mask, stack = TRUE)
+#   )
+# )
+# plot(out)
+# ##################################################################################################
+# #mask
+# xm <- list.files(MASK,full.names = TRUE)
+# xm<- xm[sapply(xm, file.size) > 1000]
+# exmt<- xm %>% map( . %>% gsub(pattern = file.path(MASK,"mask"), replacement = ""))
+# ttrain<-   paste0(file.path(TRAIN,"image"),exmt) %>% unlist
+# imagesm <- tibble(
+#   image = ttrain,
+#   mask = xm
+#   ) %>%
+#   sample_n(3) %>%
+#   map(. %>% magick::image_read() %>% magick::image_resize("128x128"))
+# 
+# 
+# out <- magick::image_append(c(
+#   magick::image_append(imagesm$mask, stack = TRUE),
+#   magick::image_append(imagesm$image, stack = TRUE)
+#   #magick::image_append(images$predicted_mask, stack = TRUE)
+#   )
+# )
+# plot(out)
+
+
+```
+
+
+
+
+```{r}
+
+# takes additional parameters, including number of downsizing blocks, 
+# number of filters to start with, and number of classes to identify
+# see ?unet for more info
+
+# BATCH_SIZE =28
+# SIZE = 2^7
+
+
+xt <- list.files(TRAIN,full.names = TRUE)
+xt<- xt[sapply(xt, file.size) > 50 *1000]
+extt<- xt %>% map( . %>% gsub(pattern = file.path(TRAIN,"image"), replacement = ""))
+msk<-   paste0(file.path(MASK,"mask"),extt) %>% unlist
+imagest <- tibble(
+  img = xt,
+  mask =msk
+  ) 
+
+xm <- list.files(MASK,full.names = TRUE)
+xm<- xm[sapply(xm, file.size) >500]
+exmt<- xm %>% map( . %>% gsub(pattern = file.path(MASK,"mask"), replacement = ""))
+ttrain<-   paste0(file.path(TRAIN,"image"),exmt) %>% unlist
+imagesm <- tibble(
+  img = ttrain,
+  mask = xm
+  ) 
+######################################################## debug
+
+# imagesm <- tibble(
+#   img = ttrain,
+#   mask = xm
+#   ) %>%
+#   sample_n(3) %>%
+#    map_depth(2,. %>% load.image )
+# fcc<-function(img,pred){
+#   out<-colorise(img,pred %>% as.pixset,"blue",alpha = .3)
+#   out
+# }
+# out<- map2(imagesm$img,imagesm$mask, fcc) %>% imappend(axis="x")
+# plot(out)
+####################################################
+set.seed(123)
+
+imagest$glo <- imagest$mask %in% xm
+csplit<- initial_split(imagest, prop = 9/10,strata = glo)
+train.data<- training(csplit) %>% select(-glo)
+test.data<- testing(csplit) %>% select(-glo)
+
+
+# #true
+# nm<-sample(nrow(imagesm), 500)
+# 
+# #the true left
+# tl<- imagesm[-nm,]
+# #test, no true
+# noglo<-!imagest$img %in% imagesm$img
+# noglot<-imagest[noglo,]
+# 
+# 
+# nt<- sample(nrow(noglot),9000)
+# ntest<- sample(nrow(noglot),50)
+# train.data<- rbind(imagesm[-nm,],noglot[nt,]) %>% sample_n(nrow(.))
+# test.data<-rbind(imagesm[nm,], noglot[ntest,] )%>% sample_n(nrow(.))
+
+
+random_bsh <- function(img) {
+  img %>%
+    tf$image$random_brightness(max_delta = 0.3) %>%
+    tf$image$random_contrast(lower = 0.5, upper = 0.7) %>%
+    tf$image$random_saturation(lower = 0.5, upper = 0.7) %>%
+    # make sure we still are between 0 and 1
+    tf$clip_by_value(0, 1)
+}
+
+# training_dataset <- training_dataset %>%
+#   dataset_map(~.x %>% list_modify(
+#     img = random_bsh(.x$img)
+#   ))
+# 
+
+
+# 
+# example <- training_dataset %>% as_iterator() %>% iter_next()
+# example$img %>% as.array() %>% image_read() %>% plot()
+# 
+
+create_dataset <- function(data, train, batch_size = BATCH_SIZE) {
+  
+  dataset <- data %>% 
+    tensor_slices_dataset() %>% 
+   dataset_map(~.x %>% list_modify(
+    # decode_jpeg yields a 3d tensor of shape (1280, 1918, 3)
+    img = tf$image$decode_png(tf$io$read_file(.x$img)),
+    # decode_gif yields a 4d tensor of shape (1, 1280, 1918, 3),
+    # so we remove the unneeded batch dimension and all but one 
+    # of the 3 (identical) channels
+    mask =tf$image$decode_png(tf$io$read_file(.x$mask))
+  ))%>% 
+  dataset_map(~.x %>% list_modify(
+    img = tf$image$convert_image_dtype(.x$img, dtype = tf$float32),
+    mask = tf$image$convert_image_dtype(.x$mask, dtype = tf$float32)
+  )) %>%
+   dataset_map(~.x %>% list_modify(
+      img = tf$image$resize(.x$img, size = shape(SIZE, SIZE)),
+      mask = tf$image$resize(.x$mask, size = shape(SIZE, SIZE))[,,1,drop=F]
+    )) #%>%
+  # dataset_map(~.x %>% list_modify(
+  #     img = k_expand_dims(.x$img, axis = 1),
+  #     mask = k_expand_dims(.x$mask, axis = 1)
+  #   ))
+  
+x<- dataset %>% as_iterator()%>% iter_next()
+
+#  data augmentation performed on training set only
+  # if (train) {
+  #   dataset <- dataset %>%
+  #     dataset_map(~.x %>% list_modify(
+  #       img = random_bsh(.x$img)
+  #     ))
+  # }
+
+  # shuffling on training set only
+  if (train) {
+    dataset <- dataset %>% 
+      dataset_shuffle(buffer_size = batch_size*2^4)
+  }
+  
+  # train in batches; batch size might need to be adapted depending on
+  # available memory
+  dataset <- dataset %>% 
+    dataset_batch(batch_size)
+  
+  dataset %>% 
+    # output needs to be unnamed
+    dataset_map(unname) 
+}
+
+training_dataset <- create_dataset(train.data, train = TRUE)
+validation_dataset <- create_dataset(test.data, train = FALSE)
+
+#model <- unet(input_shape = c(SIZE, SIZE, 3))
+##########################################################################################
+x<- training_dataset %>% as_iterator() %>% iter_next() %>% .[[1]] %>% .[1,,,] %>% k_expand_dims(axis=1)
+hub_layer(x)
+library(tfhub)
+ai<- "https://tfhub.dev/nvidia/unet/industrial/class_9/1"
+
+input <- layer_input(shape = c(SIZE, SIZE, 3))
+hub_layer <- layer_hub(handle = ai, trainable=TRUE)
+
+
+output <- input %>%
+    layer_lambda(function(x) tensorflow::tf$image$resize(x, c(224L, 224L))) %>% 
+    hub_layer %>%
+    #layer_global_max_pooling_2d() %>% 
+     layer_dense(units = 1,activation = "sigmoid")
+
+model <- keras_model(input, output)
+
+# base_model<- model <- application_densenet(weights = NULL,
+#                                            input_shape = c(SIZE, SIZE, 3),
+#                                            include_top = F,
+#                                            classes = 1)
+# predictions<-base_model$output %>%
+#   layer_dense(units = 1,activation = "sigmoid")
+# model <- keras_model(inputs = base_model$input, outputs = predictions)
+
+##########################################################################################
+summary(model)
+
+
+model %>% compile(
+  optimizer =optimizer_rmsprop(lr=1e-4),# optimizer_nadam(lr = 1e-4),
+  loss = bce_dice_loss,
+  metrics = list(dice,metric_binary_accuracy)
+)
+
+
+hist<- model %>% 
+  fit(
+  training_dataset,
+  epochs = 25,
+  #batch_size=2^10,
+  verbose = 1,
+  #validation_split = 0.2
+  validation_data = validation_dataset
+    )
+
+
+ save_model_hdf5(model, "m8774.hdf5")
+  save_model_hdf5(model,file.path(EVAL, "m500_50_12000.hdf5") )
+
+# 2021-01-17 04:36:35.548427: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:230] Shuffle buffer filled.
+# Epoch 23/25
+# 244/244 [==============================] - 92s 331ms/step - loss: 0.1490 - dice: 0.8922 - binary_accuracy: 0.9899 - val_loss: 0.3991 - val_dice: 0.8688 - val_binary_accuracy: 0.9490
+# 2021-01-17 04:38:06.351462: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:177] Filling up shuffle buffer (this may take a while): 1823 of 2048
+# 2021-01-17 04:38:07.607702: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:230] Shuffle buffer filled.
+# Epoch 24/25
+# 244/244 [==============================] - 86s 308ms/step - loss: 0.1396 - dice: 0.8986 - binary_accuracy: 0.9904 - val_loss: 0.3858 - val_dice: 0.8758 - val_binary_accuracy: 0.9519
+# 2021-01-17 04:39:32.863342: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:177] Filling up shuffle buffer (this may take a while): 1837 of 2048
+# 2021-01-17 04:39:34.006519: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:230] Shuffle buffer filled.
+# Epoch 25/25
+# 244/244 [==============================] - 92s 333ms/step - loss: 0.1402 - dice: 0.8986 - binary_accuracy: 0.9906 - val_loss: 0.3310 - val_dice: 0.8774 - val_binary_accuracy: 0.9527
+```
+
+
+
+
+
+
+
+
+
+```{r}
+
+
+
+# 
+# 
+# batch <- validation_dataset %>% as_iterator() %>% iter_next()
+# predictions <- predict(model, batch[[1]])
+# 
+# images <- tibble(
+#   image = batch[[1]] %>% array_branch(1),
+#   predicted_mask = predictions[,,,1] %>% array_branch(1),
+#   mask = batch[[2]][,,,1]  %>% array_branch(1)
+# ) %>%
+#   sample_n(2) %>%
+#   map_depth(2, function(x) {
+#     as.raster(x) %>% magick::image_read()
+#   }) %>%
+#   map(~do.call(c, .x))
+# 
+# 
+# out <- magick::image_append(c(
+#   magick::image_append(images$mask, stack = TRUE),
+#   magick::image_append(images$image, stack = TRUE),
+#   magick::image_append(images$predicted_mask, stack = TRUE)
+#   )
+# )
+# 
+# plot(out)
+
+
+```
+
+```{r}
+library(imager)
+thr=.1
+
+batch <- validation_dataset %>% as_iterator() %>% iter_next()
+predictions <- predict(model, batch[[1]])
+
+images <- tibble(
+  image = batch[[1]] %>% array_branch(1),
+  predicted_mask = predictions[,,,1] %>% array_branch(1),
+  mask = batch[[2]][,,,1]  %>% array_branch(1)
+) %>% 
+  sample_n(4) %>%
+  map_depth(2, as.cimg)
+
+images$predicted_mask<- images$predicted_mask %>% map( function(x) x > thr)
+images$mask<- images$mask %>% map( function(x) x > thr)
+
+fcc<-function(img,pred){
+  out<-colorise(img,pred,"blue",alpha = .3)
+  out
+}
+out.pred<- map2(images$image,images$predicted_mask, fcc) %>% imappend(axis="x")
+out.true<- map2(images$image, images$mask, fcc) %>% imappend(axis="x")
+out<-imappend(list(out.pred,out.true),axis = "y")
+plot(out, main= "pred (first) x true")
+
+# out <- magick::image_append(c(
+#   magick::image_append(images$mask, stack = TRUE),
+#   magick::image_append(images$image, stack = TRUE), 
+#   magick::image_append(images$predicted_mask, stack = TRUE)
+#   )
+# )
+# 
+# plot(out)
+
+
+```
+
+
+
+
+```{r}
+# library(imager)
+# x <- list.files(MASK,full.names = TRUE)
+# x<- x[sapply(x, file.size) > 1700]
+# ext<- x %>% map( . %>% gsub(pattern = file.path(MASK,"mask"), replacement = ""))
+# 
+# ttrain<-   paste0(file.path(TRAIN,"image"),ext) %>% unlist
+# ims <- tibble(
+#   img = ttrain,
+#   mask = x
+#   )
+# 
+# x<-ims[1:3,]
+# xd<- create_dataset(x,train=F)
+# predictions<- predict(model, xd) 
+# 
+# 
+# xm <-x$mask %>% map(. %>% load.image) %>% 
+#   map(. %>%  imsplit("c") %>% .[[1]]) %>%
+#   map(. %>% imresize(1/1)) %>% 
+#   map(. %>% .[,,,1] ) %>%
+#   map(. %>% image_to_array)
+# xim<-x$img %>% map(. %>% load.image) %>% 
+#   map(. %>% imresize(1/1)) %>%
+#    map(. %>% .[,,1,] %>% image_to_array)
+# images <- tibble(
+#   image = xim,
+#   predicted_mask = predictions %>% array_branch(1),
+#   mask = xm
+# ) %>% 
+#   map_depth(2, function(x) {
+#     as.cimg(x) %>% magick::image_read()
+#   }) %>% 
+#   map(~do.call(c, .x))
+# out <- magick::image_append(c(
+#   magick::image_append(images$mask, stack = TRUE),
+#   magick::image_append(images$image, stack = TRUE), 
+#   magick::image_append(images$predicted_mask, stack = TRUE)
+#   )
+# )
+# 
+# plot(out)
+
+
+```
+
+## Submition 
+```{r}
+k=3
+ftiff<- list.files(TEST, pattern = "*.tiff")
+impath<-ftiff[3]
+basedir<- file.path("C:/kaggletemp/HuBMAP/")
+dataset<- read_csv(file.path(basedir,"HuBMAP-20-dataset_information.csv"))
+
+im<-image_read(file.path(TEST,impath))
+makeimg<-function(i,j,im=im){
+  dest<- paste0(512,"x",512, "+",i, "+", j)
+  imx<- image_crop(im,dest) %>% .[[1]] %>% as.numeric %>% #array(dim=c (1,SIZE,SIZE,3)) %>%
+  tf$image$convert_image_dtype( dtype = tf$float32)  %>%
+  tf$image$resize( size = shape(SIZE,SIZE)) %>% k_expand_dims(axis=1)
+}
+      
+  shape<-dataset %>% subset(image_file == ftiff[k] ) %>% dplyr::select(width_pixels, height_pixels) %>% unlist %>% as.vector
+  nl<-c( seq(0,shape[1]-512, 512), shape[1]-512)
+  nc<-c( seq(0,shape[2]-512, 512) , shape[2]-512)
+  nn<-expand.grid(nl,nc)
+  # walk2(nn[,1],nn[,2],makePng,im=im,mask=mask)
+  
+predsub<-array(0,dim=c(shape[1],shape[2]))
+for(i in seq_len(nrow(nn)) ){
+  img<- makeimg(nn[i,1],nn[i,2],im=im) 
+  pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>% 
+    k_squeeze(axis=1) %>% k_squeeze(axis=3) %>% as.array(dim=c(512,512))
+  if( img %>% as.array %>% mean==0){next}else{
+  #pred[pred > thr]<- 1, pred[pred< thr]<-0
+  pred<- pred > thr
+  }
+  predsub[  (nn[i,1]+1):(nn[i,1]+512),  (nn[i,2]+1):(nn[i,2]+512)] <- pred
+}
+x<- imsub %>% as.cimg
+
+
+#   
+# outx <-array(0,dim=c(shape[1],shape[2],1,3)) 
+# for(i in seq_len(nrow(nn)) ){
+#   img<- makeimg(nn[i,1],nn[i,2],im=im) 
+#   pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>% 
+#     k_squeeze(axis=1) %>% k_squeeze(axis=3) %>% as.array(dim=c(512,512)) %>% as.cimg
+#   
+#   img<- img %>%  tf$image$resize( size = shape(512,512)) %>%
+#     k_squeeze(axis=1) %>% k_expand_dims(axis=3) %>% as.array %>% as.cimg
+#   
+#    if( img %>% as.array %>% mean==0){pred<- pred > 1}else{
+#   #pred[pred > thr]<- 1, pred[pred< thr]<-0
+#   pred<- pred > thr
+#   }
+#   x<-colorise(img,pred,"blue",alpha = .3)
+#   
+#   outx[  (nn[i,1]+1):(nn[i,1]+512),  (nn[i,2]+1):(nn[i,2]+512),1,3] <- x %>% as.array()
+# }
+# 
+# 
+# 
+# 
+# 
+# 
+# colorise(a[[1]],b[[1]],"blue",alpha = .3)
+
+
+
+
+```
+
+
+```{r}
+mask2rle <- function(mm) {
+   idx<- which(mm==1)
+  if (length(idx) == 0) return("")
+  
+  # Make sure  values are sorted
+  idx <- sort(idx)
+  
+  # Array of starting positions and run lengths
+  starts <- c()
+  runs <- c()
+  
+  # Loop
+  starts <- c(starts, idx[1])
+  run <- 1
+  for (i in 2:length(idx)) { #run
+    if (idx[i-1] + 1 == idx[i]) {
+      run <- run + 1
+    } else { #stop
+      runs <- c(runs, run)
+      starts <- c(starts, idx[i])
+      run <- 1
+    }
+  }
+  
+  # Last run length needs special handling
+  runs <- c(runs, run)
+  
+  # Sanity check
+  stopifnot(length(starts) == length(runs))
+  
+  # zip starts and runs as space delimited list
+  return(paste0(mapply(list, paste(starts, runs)), collapse = " "))
+  
+}
+idx2rle <- function(idx) {
+  if (length(idx) == 0) return("")
+  
+  # Make sure  values are sorted
+  idx <- sort(idx)
+  
+  # Array of starting positions and run lengths
+  starts <- c()
+  runs <- c()
+  
+  # Loop
+  starts <- c(starts, idx[1])
+  run <- 1
+  for (i in 2:length(idx)) { #run
+    if (idx[i-1] + 1 == idx[i]) {
+      run <- run + 1
+    } else { #stop
+      runs <- c(runs, run)
+      starts <- c(starts, idx[i])
+      run <- 1
+    }
+  }
+  
+  # Last run length needs special handling
+  runs <- c(runs, run)
+  
+  # Sanity check
+  stopifnot(length(starts) == length(runs))
+  
+  # zip starts and runs as space delimited list
+  return(paste0(mapply(list, paste(starts, runs)), collapse = " "))
+  
+}
+# print(mask2rle(c(1,2,3,10,11,12,13,14)))
+
+
+# rleR <- function(x){
+#  # x = sort(x) # Sort x first
+#   y = diff(x) # Find successive differences - most should be 1's
+#   runs = base::rle(y) # Use the rle function in base R to compute the runs - we want to find sequences of 1's
+#   z = (runs$lengths)[which(runs$values==1)] + 1 # Get the run length
+#   indices = c(1, x[which(diff(x) != 1) + 1]) # Get the starting positions
+#   return (paste(c(rbind(indices, z)), collapse = " ")) # Put in the required format
+# }
+
+# Examples
+# rleR(c(1:5, 10:15))
+# rleR(c(1,2,3,10,11,12,13,14))
+
+
+# idx<- which(predsub==1)
+# z<-rlex(idx) #works
+
+```
+
+#Lets make a toy example
+```{r}
+# mask2rle <- function(x){
+#   #x = which(x==1) # Sort x first
+#   y = diff(x) # Find successive differences - most should be 1's
+#   runs = base::rle(y) # Use the rle function in base R to compute the runs - we want to find sequences of 1's
+#   z = (runs$lengths)[which(runs$values==1)] + 1 # Get the run length
+#   indices = c(1, x[which(diff(x) != 1) + 1]) # Get the starting positions
+#   return (paste(c(rbind(indices, z)), collapse = " ")) # Put in the required format
+# }
+
+# Examples
+
+# mask2rle<- function(x){
+#    pixel <- x %>% as.vector
+#    xx<- rle(pixel)
+#    ids<- which (xx$values != 0 )
+#    lls<- xx$lengths[ids]
+#    cs<- cumsum(xx$lengths)
+#    css<-cs[ids-1]+1
+#    return( paste(css,lls,sep = " ", collapse = " ") )
+# }
+# mask2rle<- function(pixel){
+#   pixel<- which(pixel == 1)
+#    xx<- rle(pixel)
+#    ids<- which (xx$values != 0 )
+#    lls<- xx$lengths[ids]
+#    cs<- cumsum(xx$lengths)
+#    css<-cs[ids-1]+1
+#    return( paste(css,lls,sep = " ", collapse = " ") )
+# }
+
+
+
+# rle2mask <- function(mask_rle,shape){
+#   sl<- mask_rle   %>% strsplit(" ") %>% .[[1]] %>% as.numeric
+#   starts<-sl[seq(1,(length(sl) -1),2)]
+#   lengths<-sl[seq(2,length(sl),2)]
+#   ends<-starts + lengths -1
+#   img<- matrix(0,shape[1] * shape[2]  )
+#   ids<-lapply(1:length(starts),function(i){seq(starts[i],ends[i],1)}) %>% unlist
+#   img[ids,1]<-1
+#   #img<-rep(img,3)
+#   dim(img)<-c(shape[1],shape[2],1)
+#   return((img))
+# }
+rle2mask <- function(mask_rle,shape){
+  sl<- mask_rle   %>% strsplit(" ") %>% .[[1]] %>% as.numeric
+  starts<-sl[seq(1,(length(sl) -1),2)] 
+  lengths<-sl[seq(2,length(sl),2)]
+  ends<-starts + lengths -1
+  img<- matrix(0,ncol= shape[1] ,nrow=shape[2]  )
+  #img<-imfill(0,x=shape[2],y=shape[1],z=1)
+  ids<-lapply(1:length(starts),function(i){seq(starts[i],ends[i],1)}) %>% unlist
+  img[ids]<-1
+ # dim(img)<-c(shape[2],shape[1])
+  img<-  img  #%>%imager::save.image("test.png")
+    # dim(img)<-c(shape[2],shape[1],1)
+    # img %>% image_read() %>% image_write("magictest.png", format = "png")
+  return((img))
+}
+```
+
+test_rotation
+
+```{r}
+thr = .6
+train<- read_delim(file.path(BASE,"train.csv"), delim = ",")
+test<-read_csv(file.path(BASE,"sample_submission.csv"))
+dataset<- read_csv(file.path(BASE,"HuBMAP-20-dataset_information.csv"))
+ffnames<-list.files(BASET, full.names = F,pattern = "*.tiff") %>% gsub(pattern = ".tiff",replacement =  "")
+
+makeMask<-function(i){
+  mask_rle<- train %>% subset(id == ffnames[i]) %>% dplyr::select(encoding) %>% pull
+  shape_rle<-dataset %>% subset(image_file == paste0(ffnames[i], ".tiff")) %>% dplyr::select(width_pixels, height_pixels) %>% unlist %>% as.vector
+  mask<- rle2mask(mask_rle, shape_rle)  %>% as.cimg
+  return(mask)
+}
+
+k=2
+impath<-file.path(BASET,paste0(ffnames[k],".tiff") )
+
+im<-image_read(impath)
+makeimg<-function(i,j,im=im){
+  dest<- paste0(512,"x",512, "+",i, "+", j)
+  imx<- image_crop(im,dest) %>% .[[1]] %>% as.numeric %>% aperm(perm = c(2,1,3))%>%#array(dim=c (1,SIZE,SIZE,3)) %>%
+  tf$image$convert_image_dtype( dtype = tf$float32)  %>%
+  tf$image$resize( size = shape(SIZE,SIZE)) %>% k_expand_dims(axis=1)
+}
+      
+  shape<-dataset %>% subset(image_file == paste0(ffnames[k],".tiff" )) %>% dplyr::select(width_pixels, height_pixels) %>% unlist %>% as.vector
+  nl<-c( seq(0,shape[1]-512, 512), shape[1]-512)
+  nc<-c( seq(0,shape[2]-512, 512) , shape[2]-512)
+  nn<-expand.grid(nl,nc)
+  # walk2(nn[,1],nn[,2],makePng,im=im,mask=mask)
+  wz=100
+  sl<-c( seq(0,shape[1]-512 -wz, 512) + wz, shape[1]-512)
+  sc<-c( seq(0,shape[2]-512 -wz, 512) + wz, shape[2]-512)
+  ss<-expand.grid(sl,sc)
+  
+  wz=400
+  ql<-c( seq(0,shape[1]-512 -wz, 512) + wz, shape[1]-512)
+  qc<-c( seq(0,shape[2]-512 -wz, 512) + wz, shape[2]-512)
+  qq<-expand.grid(ql,qc)
+  
+#predsub<-matrix(0, nrow= shape[1],ncol=shape[2])
+
+pb <- txtProgressBar(min = 0, max = nrow(nn), style = 3)
+
+which(nn$Var1 ==23040 & nn$Var2 == 17920)
+i= 2741
+idxt<- vector(mode="integer")
+for(i in seq_len(nrow(nn)) ){
+  img<- makeimg(nn[i,1],nn[i,2],im=im)
+  if( img %>% as.array %>% max< .2){next}
+  pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>%
+    k_squeeze(axis=1) %>% k_squeeze(axis=3) %>% as.array(dim=c(512,512))
+ #else{
+  pred<- pred %>% as.cimg > thr
+  pred <- pred %>% shrink(50) %>% grow(50)  #%>%as.matrix
+  idx<- which(pred ==1)
+  idxt<-c(idx,idxt)
+  
+  
+  # x<- img %>% .[1,,,]%>% tf$image$resize( size = shape(512,512)) %>% k_expand_dims(3) %>%   as.array()  %>% as.cimg   %>% plot
+  # colorise(x,pred,"blue", alpha = 0.3) %>% plot
+  # # predsub[  (nn[i,1]+1):(nn[i,1]+512),  (nn[i,2]+1):(nn[i,2]+512)] <- pred
+  # a<- mask2rle(pred)
+  # b<- rle2mask(a, shape = c(512,512)) #OK works check !
+  
+  setTxtProgressBar(pb, i)
+  if(i %%100 ==0){gc()}
+}
+
+######
+fx<- function(wz){
+  slw<-c(0, seq(0,shape[1]-512 -wz, 512) + wz, shape[1]-512)
+  scw<-c(0, seq(0,shape[2]-512 -wz, 512) + wz, shape[2]-512)
+  # sl<-c( seq(0,shape[1]-512 , 512) , shape[1]-512)
+  # sc<-c( seq(0,shape[2]-512 , 512) , shape[2]-512)
+  ll<- c(slw)
+  cc<-c(scw)
+  ss<-expand.grid(ll,cc)
+
+  for( i in 1:nrow(ss)){
+  img<- makeimg(ss[i,1],ss[i,2],im=im)
+  pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>%
+  k_squeeze(axis=1) %>% k_squeeze(axis=3) %>% as.array(dim=c(512,512))
+
+   ppred<-  predsub[  (ss[i,1]+1):(ss[i,1]+512),  (ss[i,2]+1):(ss[i,2]+512)]
+   predsub[  (ss[i,1]+1):(ss[i,1]+512),  (ss[i,2]+1):(ss[i,2]+512)] <- (ppred + pred) 
+  setTxtProgressBar(pb, i)
+  if(i %%100 ==0){gc()}
+  }
+  return(predsub)
+}
+#####
+
+# for(i in seq_len(nrow(ss)) ){
+# 
+#   img<- makeimg(ss[i,1],ss[i,2],im=im)
+#   pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>%
+#     k_squeeze(axis=1) %>% k_squeeze(axis=3) %>% as.array(dim=c(512,512))
+#   if( img %>% as.array %>% max< .2){next}else{
+#   #pred<- pred %>% as.cimg > thr
+#   #pred <- pred %>% shrink(50) %>% grow(50)  %>%as.matrix
+#   # img %>% .[1,,,] %>% k_expand_dims(3) %>% as.array() %>% as.cimg %>% plot()
+#   #pred<- pred > thr
+#   }
+#    ppred<-  predsub[  (ss[i,1]+1):(ss[i,1]+512),  (ss[i,2]+1):(ss[i,2]+512)]
+#    predsub[  (ss[i,1]+1):(ss[i,1]+512),  (ss[i,2]+1):(ss[i,2]+512)] <- (ppred + pred) 
+# 
+#   setTxtProgressBar(pb, i)
+#   if(i %%100 ==0){gc()}
+# }
+# for(i in seq_len(nrow(qq)) ){
+# 
+#   img<- makeimg(qq[i,1],qq[i,2],im=im)
+#   pred<- predict(model, img) %>%  tf$image$resize( size = shape(512,512)) %>%
+#     k_squeeze(axis=1) %>% k_squeeze(axis=3) %>% as.array(dim=c(512,512))
+#   if( img %>% as.array %>% max< .2){next}else{
+#   #pred<- pred %>% as.cimg > thr
+#   #pred <- pred %>% shrink(50) %>% grow(50)  %>%as.matrix
+#   # img %>% .[1,,,] %>% k_expand_dims(3) %>% as.array() %>% as.cimg %>% plot()
+#   #pred<- pred > thr
+#   }
+#    ppred<-  predsub[  (qq[i,1]+1):(qq[i,1]+512),  (qq[i,2]+1):(qq[i,2]+512)]
+#    predsub[  (qq[i,1]+1):(qq[i,1]+512),  (qq[i,2]+1):(qq[i,2]+512)] <- (ppred + pred) 
+# 
+#   setTxtProgressBar(pb, i)
+#   if(i %%100 ==0){gc()}
+# }
+# walk(1:nrow(nn),fx,wz=100)
+# walk(1:nrow(nn),fx,wz=400)
+# predsub<-fx(100)
+# predsub<-fx(200)
+# predsub<-fx(300)
+# predsub<-fx(400)
+windows<- seq(20,480,20)
+for(i in windows){
+  predsub<-fx(i)
+}
+predsub<- predsub /(length(windows) + 1)
+
+xx<- predsub
+predsub<-xx
+for(i in seq_len(nrow(nn)) ){
+  pred<- predsub[  (nn[i,1]+1):(nn[i,1]+512),  (nn[i,2]+1):(nn[i,2]+512)] 
+  pred<- pred %>% as.cimg > 0.6
+  pred <- pred %>% shrink(50) %>% grow(50)  %>%as.matrix 
+  predsub[  (nn[i,1]+1):(nn[i,1]+512),  (nn[i,2]+1):(nn[i,2]+512)]  <- pred
+  setTxtProgressBar(pb, i)
+  if(i %%100 ==0){gc()}
+}
+
+
+
+x<- predsub %>% as.cimg
+imager::save.image(x,file=file.path(EVAL,"pred8.png"))
+
+b<- x %>% threshold() %>% as.cimg
+imager::save.image(b,file=file.path(EVAL,"predb.png"))
+
+bb<- b %>% shrink(50) %>% grow(50) %>% as.cimg
+imager::save.image(bb,file=file.path(EVAL,"predbb.png"))
+
+mtrue<- makeMask(k)
+imager::save.image(mtrue,file= file.path(EVAL,"true.png" ) )
+
+# imm<- im[[1]] %>% as.numeric %>% as.cimg
+
+
+
+ 
+ # which threshould is better?
+mtrue<- makeMask(6)
+ ttrue<- mtrue %>% k_variable()
+# for(i in seq_len(nrow(nn)) ){
+fx<- function(tx){ 
+    predsub<-xx
+  for(i in 1:nrow(nn)){
+  pred<- predsub[  (nn[i,1]+1):(nn[i,1]+512),  (nn[i,2]+1):(nn[i,2]+512)]
+  pred<- pred %>% as.cimg > tx
+  pred <- pred %>% shrink(50) %>% grow(50)  %>%as.matrix 
+  predsub[  (nn[i,1]+1):(nn[i,1]+512),  (nn[i,2]+1):(nn[i,2]+512)]  <- pred
+  setTxtProgressBar(pb, i)
+  }
+  tpred<- predsub %>% k_variable()
+  res<- dice(ttrue,tpred) %>% as.array
+ return(res)
+}
+seqs<- seq(.61,.63,.01)
+res<- map(seqs,fx); names(res)<- seqs
+
+```
+
+```{r}
+ # which threshould is better?
+ ttrue<- mtrue %>% k_variable()
+# for(i in seq_len(nrow(nn)) ){
+fxs<- function(tx){ 
+    predsub<-xx
+  for(i in 1:nrow(nn)){
+  pred<- predsub[  (nn[i,1]+1):(nn[i,1]+512),  (nn[i,2]+1):(nn[i,2]+512)] /5  #(length(windows) + 1)
+  pred<- pred %>% as.cimg > tx
+  pred <- pred %>% shrink(50) %>% grow(50)  %>%as.matrix 
+  predsub[  (nn[i,1]+1):(nn[i,1]+512),  (nn[i,2]+1):(nn[i,2]+512)]  <- pred
+  setTxtProgressBar(pb, i)
+  }
+  tpred<- predsub %>% k_variable()
+  res<- dice(ttrue,tpred) %>% as.array
+  gc()
+ return(res)
+}
+# sh<- gr<-seq(20,70,10)
+# sg<-expand.grid(sh,gr)
+seqs<-seq(5.9,6.4,.1)
+res<- map(seqs,fxs); names(res)<-seqs #paste0(sg[,1], "_",sg[,2])
+
+```
+
+
+```{r}
+model<-load_model_hdf5(file.path(EVAL,"m500_50_12000.hdf5"), custom_objects = c("bce_dice_loss"= bce_dice_loss, "dice"=dice))
+
+```
+
+
